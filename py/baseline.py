@@ -12,27 +12,18 @@ import argparse
 from datetime import datetime
 from torch.utils.data.dataloader import DataLoader
 from torchvision import datasets
-from torchvision.transforms.transforms import RandomApply
-from torchvision.utils import save_image
-from collections import deque
 
 from torch import optim
 from torch import nn
 from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
-from encoder import Encoder, ResEncoder
+from encoder import BaseLine
 
 to_tensor = transforms.ToTensor()
 
-train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(32),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-    transforms.RandomGrayscale(p=0.2),
-    transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
-
-test_transform = transforms.Compose([
-    transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+def rightCalc(pred:torch.Tensor, gt:torch.Tensor):
+    _, idx = torch.max(pred, dim = -1)
+    return sum(idx == gt)
 
 if __name__ == "__main__":
     vec_dim = 128
@@ -41,11 +32,9 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type = int, default = 50, help = "Training lasts for . epochs")
     parser.add_argument("--max_iter", type = int, default = 20, help = "max iteration number")
     parser.add_argument("--batch_size", type = int, default = 50, help = "Batch size in training")
-    parser.add_argument("--queue_size", type = int, default = 20, help = "Max queue size in MoCo queue dictionary look up")
     parser.add_argument("--eval_time", type = int, default = 5, help = "Evaluate every <eval_time> times")
     parser.add_argument("--eval_size", type = int, default = 10, help = "Test only part of the images to save time")
     parser.add_argument("--check_point", type = int, default = 200, help = "Save checkpoint file every <> times.")
-    parser.add_argument("--momentum", type = float, default = 0.995, help = "Momentum update ratio")
     parser.add_argument("-d", "--del_dir", action = "store_true", help = "Delete dir ./logs and start new tensorboard records")
     parser.add_argument("-b", "--use_bn", action = "store_true", help = "Use batch normalization in Encoder")
     parser.add_argument("-c", "--cuda", default = False, action = "store_true", help = "Use CUDA to speed up training")
@@ -60,7 +49,6 @@ if __name__ == "__main__":
     use_bn      = args.use_bn
     batch_size  = args.batch_size
     eval_time   = args.eval_time
-    mr          = args.momentum
     chpt_time   = args.check_point
     rm_chpt     = args.remove_chpt
 
@@ -89,77 +77,71 @@ if __name__ == "__main__":
         batch_size = batch_size, shuffle = True,
     )
 
-    f_q = ResEncoder()
-    f_k = ResEncoder()
-    f_k.load_state_dict(f_q.state_dict())
+    net = BaseLine(use_bn, 4)
 
     if use_cuda and torch.cuda.is_available():
-        f_q = f_q.cuda()
-        f_k = f_k.cuda()
+        net = net.cuda()
     else:
         print("CUDA is not available.")
         exit(0)
 
-    deq = deque([torch.normal(0, 1, (batch_size, vec_dim)).cuda()], maxlen = args.queue_size)
-    opt = optim.Adam(f_q.parameters(), lr = 0.001)
+    if args.load_chpt:
+        save = torch.load("..\\chpt\\baseline_6_399.pt")
+        save_model = save['model']
+        model_dict = net.state_dict()
+        state_dict = {k:v for k, v in save_model.items() if k in model_dict}
+        model_dict.update(state_dict)
+        net.load_state_dict(model_dict) 
+
+    opt = optim.Adam(net.parameters(), lr = 0.00001)
     loss_func = nn.CrossEntropyLoss()
     train_batch_num = len(train_set)
-    f_k.eval()
     for i in range(epochs):
-        for n, (x, _) in enumerate(train_set):
+        train_rights = 0
+        for n, (x, y) in enumerate(train_set):
             opt.zero_grad()
             x = x.cuda()
-            x_q = train_transform(x)
-            x_k = train_transform(x)
-            q = f_q.forward(x_q)
-            k = f_k.forward(x_k)
-            k = k.detach()
-            l_pos = torch.bmm(q.view(batch_size, 1, vec_dim), k.view(batch_size, vec_dim, 1)).squeeze(dim = -1)
-            lut = torch.cat([_k for _k in deq], dim = 0)      # deq are bunch of (batch_size, vec_dim)
-            l_neg = torch.mm(q.view(batch_size, vec_dim), lut.transpose(0, 1))
-            logits = torch.cat([l_pos, l_neg], dim = 1)
-            labels = torch.zeros(batch_size).long().cuda()
-            loss = loss_func(logits, labels)
+            y = y.cuda()
+            out = net.forward(x)
+            loss = loss_func(out, y)
+            train_rights += rightCalc(out, y)
             loss.backward()
             opt.step()
-            f_k.paramUpdate(f_q.parameters(), mr)
             if n % eval_time == 0:
-                f_q.eval()
+                net.eval()
                 with torch.no_grad():
                     test_loss = 0
                     test_cnt = 0
-                    for seq, (y, _) in enumerate(test_set):
+                    test_rights = 0
+                    for seq, (x, y) in enumerate(test_set):
+                        x = x.cuda()
                         y = y.cuda()
-                        y_q = test_transform(x)
-                        y_k = test_transform(x)
-                        q = f_q.forward(x_q)
-                        tk = f_k.forward(x_k)
-                        tk = tk.detach()
-                        l_pos = torch.bmm(q.view(batch_size, 1, vec_dim), tk.view(batch_size, vec_dim, 1)).squeeze(dim = -1)
-                        lut = torch.cat([_k for _k in deq], dim = 0)      # deq are bunch of (batch_size, vec_dim)
-                        l_neg = torch.mm(q.view(batch_size, vec_dim), lut.transpose(0, 1))
-                        logits = torch.cat([l_pos, l_neg], dim = 1)
-                        labels = torch.zeros(batch_size).long().cuda()
-                        test_loss += loss_func(logits, labels).item()
+                        out = net.forward(x)
+                        test_loss
+                        test_loss += loss_func(out, y).item()
+                        test_rights += rightCalc(out, y)
                         test_cnt += 1
                         if seq > args.eval_size:
                             break
                     test_loss /= test_cnt
-                    writer.add_scalar('Loss/Test Loss', test_loss, test_cnt + train_batch_num * i)
-                    writer.add_scalar('Loss/Train Loss', loss.item(), test_cnt + train_batch_num * i)
-                    print("Epoch: %3d / %3d\t Batch %4d / %4d\t train loss: %.4f\t test loss: %.4f"%(
-                        i, epochs, n, train_batch_num, loss.item(), test_loss,
+                    test_acc = test_rights / (batch_size * args.eval_size)
+                    train_acc = train_rights / (batch_size * eval_time)
+                    train_rights = 0
+                    writer.add_scalar('Loss/Test Loss', test_loss, n + train_batch_num * i)
+                    writer.add_scalar('Loss/Train Loss', loss.item(), n + train_batch_num * i)
+                    writer.add_scalar('Acc/Train Accuracy', train_acc, n + train_batch_num * i)
+                    writer.add_scalar('Acc/Test Accuracy', test_acc, n + train_batch_num * i)
+                    print("Epoch: %3d / %3d\t Batch %4d / %4d\t train loss: %.4f\t test loss: %.4f\ttrain acc: %.4f\ttest_acc: %.4f"%(
+                        i, epochs, n, train_batch_num, loss.item(), test_loss, train_acc, test_acc
                     ))
-                f_q.train()
+                net.train()
             if (n + 1) % chpt_time == 0:
-                name = "..\\chpt\\check_point_%d_%d.pt"%(i, n)
-                torch.save({'model': f_q.state_dict(), 'optimizer': opt.state_dict()}, name)
-            deq.append(k)
-        # save_image(gen.detach().clamp_(0, 1), "..\\imgs\\G_%d.jpg"%(epoch + 1), 1)
+                name = "..\\chpt\\baseline_%d_%d.pt"%(i, n)
+                torch.save({'model': net.state_dict(), 'optimizer': opt.state_dict()}, name)
     torch.save({
-        'model': f_q.state_dict(),
+        'model': net.state_dict(),
         'optimizer': opt.state_dict()},
-        "..\\model\\model.pth"
+        "..\\model\\baseline.pth"
     )
     writer.close()
     print("Output completed.")

@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from torch.nn.modules.batchnorm import BatchNorm2d
 from torch.nn.modules.linear import Linear
+from torchvision.models import resnet18
 
 def makeConvBlock(in_chan:int, out_chan:int, k:int, use_norm = True, pool = False):
     pad = k // 2
@@ -21,11 +22,11 @@ def makeConvBlock(in_chan:int, out_chan:int, k:int, use_norm = True, pool = Fals
     return nn.Sequential(*bloc)
 
 class Encoder(nn.Module):
-    def __init__(self, use_bn = False):
+    def __init__(self, use_bn = False, rb_num = 3):
         super().__init__()
         self.conv1 = makeConvBlock(3, 64, 5, use_bn, True)               # out 32 * 16 * 16
         self.conv2 = makeConvBlock(64, 64, 3, use_bn, True)              # out 64 * 8 * 8
-        self.convs = nn.ModuleList([makeConvBlock(64, 64, 3, use_bn, False) for i in range(3)])
+        self.convs = nn.ModuleList([makeConvBlock(64, 64, 3, use_bn, False) for i in range(rb_num)])
         self.out_conv = makeConvBlock(64, 16, 3, use_bn, True)           # out 16 * 4 * 4
         self.lin = nn.Linear(256, 128)
         for m in self.modules():
@@ -42,7 +43,7 @@ class Encoder(nn.Module):
         x = self.conv1(x)
         x = self.conv2(x)
         for i in range(3):
-            x = self.convs[i](x)
+            x = x + self.convs[i](x)
         x = self.out_conv(x)
         x = self.lin(x.contiguous().view(-1, 256))
         x = x / x.norm(dim = -1).view(-1, 1)        # L2 normalization
@@ -53,9 +54,26 @@ class Encoder(nn.Module):
         for px, py in zip(self.parameters(), param):
             px = m * px + (1.0 - m) * py
 
+class ResEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.resnet = resnet18(pretrained = False)
+        self.fc = nn.Sequential(
+            nn.ReLU(True),
+            nn.Linear(1000, 128),
+        )
+
+    def forward(self, x):
+        x = self.resnet.forward(x)
+        return self.fc(x)
+
+    def paramUpdate(self, param, m):
+        for px, py in zip(self.parameters(), param):
+            px = m * px + (1.0 - m) * py
+
 class BaseLine(Encoder):
-    def __init__(self, use_bn = False):
-        super().__init__(use_bn)
+    def __init__(self, use_bn = False, rb_num = 4):
+        super().__init__(use_bn, rb_num)
         self.out = nn.Sequential(
             nn.ReLU(True),
             nn.Linear(128, 64),
