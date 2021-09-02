@@ -15,12 +15,6 @@ class Linear(nn.Module):
             nn.Linear(in_chan, 64),
             nn.Dropout(0.1),
             nn.ReLU(True),
-            nn.Linear(64, 64),
-            nn.Dropout(0.1),
-            nn.ReLU(True),
-            nn.Linear(64, 32),
-            nn.Dropout(0.1),
-            nn.ReLU(True),
             nn.Linear(32, out_chan),
         )
 

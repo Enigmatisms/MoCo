@@ -1,0 +1,1 @@
+python3 ./moco.py -c -d -r --epochs=200 --batch_size=100 --check_point=100 --queue_size=80 --eval_time=10 --eval_size=20

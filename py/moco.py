@@ -12,15 +12,27 @@ import argparse
 from datetime import datetime
 from torch.utils.data.dataloader import DataLoader
 from torchvision import datasets
-from torchvision.transforms.transforms import RandomApply
-from torchvision.utils import save_image
+from torchvision.datasets.cifar import CIFAR10
 from collections import deque
+from PIL import Image
 
 from torch import optim
 from torch import nn
 from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
-from encoder import Encoder, ResEncoder
+from encoder import ResEncoder
+
+class CIFAR10Loader(CIFAR10):
+    def __init__(self, root, train, transform, target_transform = None, download = False):
+        super().__init__(root, train=train, transform=transform, target_transform=target_transform, download=download)
+
+    def __getitem__(self, index):
+        img = self.data[index]
+        img = Image.fromarray(img)
+        if self.transform is not None:
+            im_1 = self.transform(img)
+            im_2 = self.transform(img)
+        return im_1, im_2
 
 to_tensor = transforms.ToTensor()
 
@@ -29,9 +41,11 @@ train_transform = transforms.Compose([
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
     transforms.RandomGrayscale(p=0.2),
+    transforms.ToTensor(),
     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 
 test_transform = transforms.Compose([
+    transforms.ToTensor(),
     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 
 if __name__ == "__main__":
@@ -45,7 +59,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_time", type = int, default = 5, help = "Evaluate every <eval_time> times")
     parser.add_argument("--eval_size", type = int, default = 10, help = "Test only part of the images to save time")
     parser.add_argument("--check_point", type = int, default = 200, help = "Save checkpoint file every <> times.")
-    parser.add_argument("--momentum", type = float, default = 0.995, help = "Momentum update ratio")
+    parser.add_argument("--momentum", type = float, default = 0.999, help = "Momentum update ratio")
     parser.add_argument("-d", "--del_dir", action = "store_true", help = "Delete dir ./logs and start new tensorboard records")
     parser.add_argument("-b", "--use_bn", action = "store_true", help = "Use batch normalization in Encoder")
     parser.add_argument("-c", "--cuda", default = False, action = "store_true", help = "Use CUDA to speed up training")
@@ -67,24 +81,24 @@ if __name__ == "__main__":
     logdir = '../logs/'
     if os.path.exists(logdir) and del_dir:
         shutil.rmtree(logdir)
-    if os.path.exists("..\\chpt"):
+    if os.path.exists("../chpt"):
         if rm_chpt:
-            shutil.rmtree("..\\chpt")
-            os.mkdir("..\\chpt")
+            shutil.rmtree("../chpt")
+            os.mkdir("../chpt")
     else:
-        os.mkdir("..\\chpt")
+        os.mkdir("../chpt")
 
     time_stamp = "{0:%Y-%m-%d/%H-%M-%S}-epoch{1}/".format(datetime.now(), epochs)
     writer = SummaryWriter(log_dir = logdir+time_stamp)
 
     train_set = DataLoader(
-        datasets.CIFAR10("..\\data\\", 
+        CIFAR10Loader("../data/", 
             train = True, download = False, transform = to_tensor),
         batch_size = batch_size, shuffle = True,
     )
 
     test_set = DataLoader(
-        datasets.CIFAR10("..\\data\\", 
+        CIFAR10Loader("../data/", 
             train = False, download = False, transform = to_tensor),
         batch_size = batch_size, shuffle = True,
     )
@@ -101,16 +115,15 @@ if __name__ == "__main__":
         exit(0)
 
     deq = deque([torch.normal(0, 1, (batch_size, vec_dim)).cuda()], maxlen = args.queue_size)
-    opt = optim.Adam(f_q.parameters(), lr = 0.001)
+    opt = optim.SGD(f_q.parameters(), lr = 0.03, weight_decay = 0.0001, momentum=0.9)
     loss_func = nn.CrossEntropyLoss()
     train_batch_num = len(train_set)
     f_k.eval()
     for i in range(epochs):
-        for n, (x, _) in enumerate(train_set):
+        for n, (x_q, x_k) in enumerate(train_set):
             opt.zero_grad()
-            x = x.cuda()
-            x_q = train_transform(x)
-            x_k = train_transform(x)
+            x_q = x_q.cuda()
+            x_k = x_k.cuda()
             q = f_q.forward(x_q)
             k = f_k.forward(x_k)
             k = k.detach()
@@ -128,10 +141,9 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     test_loss = 0
                     test_cnt = 0
-                    for seq, (y, _) in enumerate(test_set):
-                        y = y.cuda()
-                        y_q = test_transform(x)
-                        y_k = test_transform(x)
+                    for seq, (y_q, y_k) in enumerate(test_set):
+                        y_q = y_q.cuda()
+                        y_k = y_k.cuda()
                         q = f_q.forward(x_q)
                         tk = f_k.forward(x_k)
                         tk = tk.detach()
@@ -152,14 +164,14 @@ if __name__ == "__main__":
                     ))
                 f_q.train()
             if (n + 1) % chpt_time == 0:
-                name = "..\\chpt\\check_point_%d_%d.pt"%(i, n)
+                name = "../chpt/check_point_%d_%d.pt"%(i, n)
                 torch.save({'model': f_q.state_dict(), 'optimizer': opt.state_dict()}, name)
             deq.append(k)
-        # save_image(gen.detach().clamp_(0, 1), "..\\imgs\\G_%d.jpg"%(epoch + 1), 1)
+        # save_image(gen.detach().clamp_(0, 1), "../imgs/G_%d.jpg"%(epoch + 1), 1)
     torch.save({
         'model': f_q.state_dict(),
         'optimizer': opt.state_dict()},
-        "..\\model\\model.pth"
+        "../model/model.pth"
     )
     writer.close()
     print("Output completed.")
