@@ -79,7 +79,7 @@ if __name__ == "__main__":
     )
 
     encoder = ResEncoder()
-    net = Linear()
+    net = Linear(128, 10)
 
     if use_cuda and torch.cuda.is_available():
         net = net.cuda()
@@ -89,12 +89,12 @@ if __name__ == "__main__":
         exit(0)
 
     if args.load_chpt:
-        save = torch.load("..\\chpt\\baseline_6_399.pt")
+        save = torch.load("..\\model\\check_point_128_99.pt")
         save_model = save['model']
         model_dict = net.state_dict()
         state_dict = {k:v for k, v in save_model.items() if k in model_dict}
         model_dict.update(state_dict)
-        net.load_state_dict(model_dict) 
+        encoder.load_state_dict(model_dict) 
 
     opt = optim.Adam(net.parameters(), lr = 0.001)
     encoder = encoder.eval()
@@ -143,7 +143,7 @@ if __name__ == "__main__":
                     ))
                 net.train()
             if (n + 1) % chpt_time == 0:
-                name = "..\\chpt\\baseline_%d_%d.pt"%(i, n)
+                name = "..\\chpt\\downstream_%d_%d.pt"%(i, n)
                 torch.save({'model': net.state_dict(), 'optimizer': opt.state_dict()}, name)
     torch.save({
         'model': net.state_dict(),
